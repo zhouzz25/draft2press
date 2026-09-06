@@ -226,26 +226,36 @@ async function openSettings() {
   $('cfg-token-budget').value = c.token_budget || '';
   $('settings-modal').classList.add('visible');
 }
-function closeSettings() { $('settings-modal').classList.remove('visible'); }
-async function saveConfig() {
+function cfgForm() {
   const v = id => $(id).value.trim(); const n = id => parseFloat($(id).value) || null;
+  return {
+    endpoint: v('cfg-endpoint') || null, model: v('cfg-model') || null,
+    context_length: n('cfg-context-length'), max_tokens: n('cfg-max-tokens'),
+    temperature: n('cfg-temperature'), thinking_mode: $('cfg-thinking-mode').value === 'true',
+    api_key: v('cfg-api-key') || null,
+    pricing: { input_per_1k: n('cfg-input-price'), output_per_1k: n('cfg-output-price') },
+    vision_endpoint: v('cfg-vision-endpoint') || null,
+    vision_api_key: v('cfg-vision-key') || null,
+    vision_model: v('cfg-vision-model') || null,
+    vision_max_tokens: n('cfg-vision-max-tokens'),
+    vision_desc_max_chars: n('cfg-vision-desc-chars'),
+    wx_app_id: v('cfg-wx-app-id') || null,
+    wx_app_secret: v('cfg-wx-app-secret') || null,
+    token_budget: n('cfg-token-budget'),
+  };
+}
+// Ask the server whether the form differs from the stored config
+async function closeSettings() {
   try {
-    await api('/api/config', 'POST', {
-      endpoint: v('cfg-endpoint') || null, model: v('cfg-model') || null,
-      context_length: n('cfg-context-length'), max_tokens: n('cfg-max-tokens'),
-      temperature: n('cfg-temperature'), thinking_mode: $('cfg-thinking-mode').value === 'true',
-      api_key: v('cfg-api-key') || null,
-      pricing: { input_per_1k: n('cfg-input-price'), output_per_1k: n('cfg-output-price') },
-      vision_endpoint: v('cfg-vision-endpoint') || null,
-      vision_api_key: v('cfg-vision-key') || null,
-      vision_model: v('cfg-vision-model') || null,
-      vision_max_tokens: n('cfg-vision-max-tokens'),
-      vision_desc_max_chars: n('cfg-vision-desc-chars'),
-      wx_app_id: v('cfg-wx-app-id') || null,
-      wx_app_secret: v('cfg-wx-app-secret') || null,
-      token_budget: n('cfg-token-budget'),
-    });
-    closeSettings(); showToast('配置已保存', 'success');
+    const { changed } = await (await fetch('/api/settings/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfgForm()) })).json();
+    if (changed && !await showConfirm('设置有未保存的修改，确定要放弃修改并关闭吗？')) return;
+  } catch {}
+  $('settings-modal').classList.remove('visible');
+}
+async function saveConfig() {
+  try {
+    await api('/api/config', 'POST', cfgForm());
+    $('settings-modal').classList.remove('visible'); showToast('配置已保存', 'success');
   } catch (e) { showToast('保存失败: ' + e.message, 'error'); }
 }
 
@@ -572,7 +582,7 @@ async function loadSession(id) {
 
 // === Listeners ===
 $('topic').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); } });
-for (const [id, fn] of [['settings-modal', closeSettings], ['confirm-modal', () => resolveConfirm(false)], ['session-modal', closeSessionList]])
+for (const [id, fn] of [['confirm-modal', () => resolveConfirm(false)], ['session-modal', closeSessionList]])
   $(id).addEventListener('click', e => { if (e.target === $(id)) fn(); });
 
 // Init

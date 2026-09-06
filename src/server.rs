@@ -146,6 +146,7 @@ pub async fn run_server(config: ModelConfig, port: u16) -> anyhow::Result<()> {
         .route("/api/import", post(import_article))
         .route("/api/cancel", post(cancel_task))
         .route("/api/config", get(get_config).post(update_config))
+        .route("/api/settings/check", post(check_settings_dirty))
         .route("/api/stats", get(get_stats))
         .route("/api/photos/{name}/recognize", post(recognize_photo))
         .route("/api/session", post(save_session))
@@ -426,6 +427,39 @@ async fn update_config(
     StatusCode::OK
 }
 
+// Compare the settings-form payload (same shape as ConfigUpdate) against the
+// current server config, so the frontend can ask whether closing the settings
+// modal would discard unsaved edits. Semantics mirror update_config:
+// "None" means the field was left untouched; empty strings for keys/secrets
+// mean "don't modify"; a non-empty key/secret typed but not saved counts as a change.
+async fn check_settings_dirty(
+    State(state): State<AppState>,
+    Json(req): Json<ConfigUpdate>,
+) -> Json<serde_json::Value> {
+    let c = state.config.read().await;
+    let mut changed = false;
+    if let Some(v) = &req.endpoint { changed |= v != &c.endpoint; }
+    if let Some(v) = &req.model { changed |= v != &c.model; }
+    if let Some(v) = req.context_length { changed |= v != c.context_length; }
+    if let Some(v) = req.max_tokens { changed |= v != c.max_tokens; }
+    if let Some(v) = req.temperature { changed |= (v - c.temperature).abs() > 1e-9; }
+    if let Some(v) = req.thinking_mode { changed |= v != c.thinking_mode; }
+    if let Some(p) = &req.pricing {
+        if let Some(v) = p.input_per_1k { changed |= (v - c.pricing.input_per_1k).abs() > 1e-12; }
+        if let Some(v) = p.output_per_1k { changed |= (v - c.pricing.output_per_1k).abs() > 1e-12; }
+    }
+    if let Some(v) = &req.api_key { changed |= !v.is_empty(); }
+    if let Some(v) = &req.vision_endpoint { changed |= c.vision_endpoint.as_deref() != Some(v.as_str()); }
+    if let Some(v) = &req.vision_api_key { changed |= !v.is_empty(); }
+    if let Some(v) = &req.vision_model { changed |= c.vision_model.as_deref() != Some(v.as_str()); }
+    if let Some(v) = req.vision_max_tokens { changed |= c.vision_max_tokens != Some(v); }
+    if let Some(v) = req.vision_desc_max_chars { changed |= c.vision_desc_max_chars != Some(v); }
+    if let Some(v) = &req.wx_app_id { changed |= c.wx_app_id.as_deref() != Some(v.as_str()); }
+    if let Some(v) = &req.wx_app_secret { changed |= !v.is_empty(); }
+    if let Some(v) = req.token_budget { changed |= c.token_budget != Some(v); }
+    Json(serde_json::json!({ "changed": changed }))
+}
+
 async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
     let tracker = state.cost_tracker.lock().await;
     Json(StatsResponse {
@@ -605,6 +639,10 @@ async fn recognize_photo(
 
     if model.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "未配置 vision 模型，请在设置页填写 vision_model".into()));
+    }
+
+    if api_key.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "未配置 API Key，请在设置页填写 API Key 或 vision_api_key".into()));
     }
 
     let data_url = {

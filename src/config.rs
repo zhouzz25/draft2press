@@ -62,7 +62,7 @@ fn default_temperature() -> f64 {
 }
 
 fn default_max_tokens() -> usize {
-    100000
+    50000
 }
 
 impl ModelConfig {

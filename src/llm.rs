@@ -77,6 +77,10 @@ impl LlmClient {
     }
 
     pub async fn chat_with_max_tokens(&self, messages: &[Message], max_tokens: usize) -> Result<LlmResponse> {
+        if self.config.api_key.is_empty() {
+            return Err(anyhow!("未配置 API Key，请在网页右上角「设置」中填写 API Key 后重试"));
+        }
+
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages: messages.to_vec(),
