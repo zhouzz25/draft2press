@@ -1,0 +1,8 @@
+/target
+.env
+api.txt
+sessions/
+config.toml
+session-*.json
+guide/
+test/

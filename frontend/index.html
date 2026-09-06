@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>公众号写作排版 Agent</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-logo">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+    </div>
+    <div class="brand-text">
+      <h1>公众号写作排版 Agent</h1>
+      <span class="brand-sub">素材 · 初稿 · 批注修订 · 排版推送</span>
+    </div>
+  </div>
+  <div id="stats" title="点击切换 USD / CNY">
+    <span class="stat-chip">调用 <b id="stat-calls">0</b> 次</span>
+    <span class="stat-chip">Token <b id="stat-tokens">0</b></span>
+    <span class="stat-chip cost">费用 <b id="stat-cost-symbol">$</b><b id="stat-cost">0.0000</b></span>
+    <button id="settings-btn" onclick="event.stopPropagation();openSettings()">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      设置
+    </button>
+  </div>
+</header>
+
+<div class="main">
+  <aside>
+    <section class="side-section">
+      <div class="section-title">参考素材</div>
+      <div class="dropzone" id="dropzone">
+        <div class="dz-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <p>拖拽文件到此处上传素材</p>
+        <p class="hint">支持 txt / md / docx / pdf</p>
+        <input type="file" id="file-input" multiple accept=".txt,.md,.docx,.pdf">
+      </div>
+      <div id="materials"></div>
+    </section>
+
+    <section class="side-section">
+      <div class="section-title">写作指令</div>
+      <div class="field">
+        <label>选题 / 指令 <span class="required">*</span></label>
+        <textarea id="topic" rows="4" placeholder="输入文章选题或写作指令"></textarea>
+      </div>
+      <div class="field">
+        <label>文章类型（可选）</label>
+        <input type="text" id="article-type" placeholder="如：活动报道、技术分享，留空让 AI 自由发挥">
+      </div>
+    </section>
+
+    <section class="side-section">
+      <button class="primary" id="generate-btn" onclick="generate()">生成初稿 <span class="shortcut">Ctrl+Enter</span></button>
+      <input type="file" id="import-input" accept=".md,.docx,.txt">
+      <div class="btn-row">
+        <button class="secondary" onclick="document.getElementById('import-input').click()">导入文章</button>
+        <button class="secondary" onclick="exportArticle()">导出 .md</button>
+        <button class="secondary" onclick="copyArticle()">复制全文</button>
+      </div>
+      <button class="primary btn-success" id="format-toggle-btn" onclick="enterFormat()">进入排版</button>
+      <div class="btn-row">
+        <button class="secondary" onclick="saveSession()">保存会话</button>
+        <button class="secondary" onclick="openSessionList()">加载会话</button>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Writing view -->
+  <div class="article-area" id="article-area">
+    <div class="article-inner">
+      <div class="article-toolbar" id="article-toolbar" style="display:none">
+        <div class="segmented">
+          <button id="mode-preview" class="mode-btn active" onclick="setMode('preview')">预览</button>
+          <button id="mode-edit" class="mode-btn" onclick="setMode('edit')">编辑</button>
+        </div>
+        <span id="word-count" class="word-count"></span>
+      </div>
+      <div class="article-placeholder" id="placeholder">
+        <div class="ph-icon">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </div>
+        <p class="ph-title">从一篇初稿开始</p>
+        <p class="ph-sub">在左侧输入选题并点击「生成初稿」<br>或导入已有的文章，选中文字即可添加批注修订</p>
+      </div>
+      <div id="article" class="article-paper" style="display:none"></div>
+      <textarea id="article-edit" class="article-edit" style="display:none" spellcheck="false"></textarea>
+    </div>
+  </div>
+
+  <!-- Format view (hidden by default) -->
+  <div class="format-view" id="format-view" style="display:none">
+    <div class="format-header">
+      <h2>排版预览</h2>
+    </div>
+    <div class="format-layout">
+      <div class="format-side">
+        <div class="format-panel">
+        <div class="section-title">配图（可选）</div>
+        <div class="dropzone dropzone-compact" id="fmt-photo-dropzone">
+          <p>拖拽照片上传</p>
+          <p class="hint">AI 将根据文件名和文章内容选择配图位置</p>
+          <input type="file" id="fmt-photo-input" multiple accept="image/*">
+        </div>
+        <div id="fmt-photos"></div>
+        <button class="secondary block" onclick="recognizeAllPhotos(this)">一键识图</button>
+
+        <div class="section-title" style="margin-top:6px">排版模板</div>
+        <div class="field">
+          <select id="template-select">
+            <option value="">AI 自动选择</option>
+          </select>
+        </div>
+        <button class="primary" onclick="formatArticle()">生成排版</button>
+
+        <div id="format-actions" style="display:none">
+          <div class="section-title">导出与推送</div>
+          <button class="secondary" onclick="copyHTML()">复制 HTML</button>
+          <button class="secondary" onclick="downloadHTML()">下载 ZIP</button>
+          <button class="primary btn-success" onclick="publishDraft()">推送草稿箱</button>
+        </div>
+
+        <div class="typo-controls" id="typo-controls" style="display:none">
+          <div class="typo-title">
+            排版微调
+            <button class="secondary typo-reset" onclick="resetTypo()">重置</button>
+          </div>
+          <label>字号 <input type="range" id="r-fs" min="12" max="22" value="16" oninput="applyTypo()"><span id="v-fs">16</span>px</label>
+          <label>行距 <input type="range" id="r-lh" min="15" max="35" value="20" oninput="applyTypo()"><span id="v-lh">2.0</span></label>
+          <label>字距 <input type="range" id="r-ls" min="0" max="3" value="1" oninput="applyTypo()"><span id="v-ls">1</span>px</label>
+          <label>左右 <input type="range" id="r-pd" min="0" max="30" value="20" oninput="applyTypo()"><span id="v-pd">20</span>px</label>
+          <label>段距 <input type="range" id="r-pm" min="0" max="20" value="10" oninput="applyTypo()"><span id="v-pm">10</span>px</label>
+        </div>
+        </div>
+      </div>
+      <div class="format-canvas">
+        <div id="format-preview" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annot-sidebar" id="annot-sidebar">
+    <div class="annot-sidebar-header">
+      <span>批注</span>
+      <button class="annot-add-btn" onclick="addAnnotationFromSelection()">+ 添加</button>
+    </div>
+    <div id="sel-indicator" class="sel-indicator">未选中文字</div>
+    <div id="annot-list" class="annot-list"></div>
+    <button class="primary" id="submit-annot-btn" onclick="submitAllAnnotations()" style="display:none">提交全部批注</button>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div id="settings-modal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>模型配置</h2>
+      <button class="modal-close" onclick="closeSettings()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section">
+        <div class="modal-section-title">模型服务</div>
+        <div class="field">
+          <label>API Endpoint <span class="required">*</span></label>
+          <input type="text" id="cfg-endpoint" placeholder="https://api.deepseek.com/chat/completions">
+        </div>
+        <div class="field">
+          <label>API Key <span class="required">*</span>（留空则不修改）</label>
+          <input type="text" id="cfg-api-key" placeholder="sk-...">
+          <span class="hint" id="cfg-key-current"></span>
+        </div>
+        <div class="field">
+          <label>模型名称 <span class="required">*</span></label>
+          <input type="text" id="cfg-model" placeholder="deepseek-v4-flash">
+        </div>
+        <div class="btn-row">
+          <div class="field" style="flex:2">
+            <label>上下文长度</label>
+            <input type="number" id="cfg-context-length" placeholder="64000">
+          </div>
+          <div class="field" style="flex:1">
+            <label>最大输出 token</label>
+            <input type="number" id="cfg-max-tokens" placeholder="4096">
+          </div>
+        </div>
+        <div class="btn-row">
+          <div class="field" style="flex:1">
+            <label>Temperature</label>
+            <input type="number" id="cfg-temperature" step="0.1" placeholder="0.7">
+          </div>
+          <div class="field" style="flex:1">
+            <label>思考模式</label>
+            <select id="cfg-thinking-mode">
+              <option value="false">关闭</option>
+              <option value="true">开启</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-row">
+          <div class="field" style="flex:1">
+            <label>输入价格 ($/1K token)</label>
+            <input type="number" id="cfg-input-price" step="0.0001" placeholder="0.00027">
+          </div>
+          <div class="field" style="flex:1">
+            <label>输出价格 ($/1K token)</label>
+            <input type="number" id="cfg-output-price" step="0.0001" placeholder="0.0011">
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Vision 识图（可选，用于照片理解）</div>
+        <div class="field">
+          <label>Vision Endpoint（留空则用上方 endpoint）</label>
+          <input type="text" id="cfg-vision-endpoint" placeholder="https://api.openai.com/v1/chat/completions">
+        </div>
+        <div class="field">
+          <label>Vision API Key（留空则用上方 key）</label>
+          <input type="text" id="cfg-vision-key" placeholder="sk-...">
+        </div>
+        <div class="field">
+          <label>Vision 模型名称</label>
+          <input type="text" id="cfg-vision-model" placeholder="gpt-4o-mini / qwen-vl-plus">
+        </div>
+        <div class="btn-row">
+          <div class="field" style="flex:1">
+            <label>Vision 最大输出 token</label>
+            <input type="number" id="cfg-vision-max-tokens" placeholder="2000" step="100">
+          </div>
+          <div class="field" style="flex:1">
+            <label>识图描述字数限制</label>
+            <input type="number" id="cfg-vision-desc-chars" placeholder="30" step="5">
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">微信公众号（用于推送草稿箱）</div>
+        <div class="field">
+          <label>AppID</label>
+          <input type="text" id="cfg-wx-app-id" placeholder="wx1234567890abcdef">
+        </div>
+        <div class="field">
+          <label>AppSecret（留空则不修改）</label>
+          <input type="text" id="cfg-wx-app-secret" placeholder="当前已配置/未配置">
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <div class="modal-section-title">Token 预算（可选）</div>
+        <div class="field">
+          <label>Token 预算上限（达到后自动中断）</label>
+          <input type="number" id="cfg-token-budget" placeholder="留空=不限制" step="1000">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="primary" onclick="saveConfig()">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<div id="image-modal" class="modal" onclick="if(event.target===this)closeImageModal()">
+  <div class="img-wrap">
+    <img id="image-large">
+    <p id="image-desc-large"></p>
+  </div>
+</div>
+
+<div id="confirm-modal" class="modal">
+  <div class="modal-content confirm">
+    <div class="modal-body confirm-body">
+      <p id="confirm-msg"></p>
+    </div>
+    <div class="modal-footer confirm-footer">
+      <button class="secondary" onclick="resolveConfirm(false)">取消</button>
+      <button class="primary" onclick="resolveConfirm(true)">确认</button>
+    </div>
+  </div>
+</div>
+
+<div id="session-modal" class="modal">
+  <div class="modal-content session">
+    <div class="modal-header">
+      <h2>历史会话</h2>
+      <button class="modal-close" onclick="closeSessionList()">&times;</button>
+    </div>
+    <div class="modal-body session-body">
+      <div id="session-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="progress-text">准备中...</div>
+  <button id="cancel-btn" onclick="cancelTask()">中断</button>
+</div>
+
+<button id="debug-toggle" onclick="toggleDebug()">Console ▼</button>
+<div id="debug-panel">
+  <div id="debug-header">
+    <span>API 调用日志</span>
+    <div>
+      <button id="debug-save" onclick="saveDebug()">保存</button>
+      <button id="debug-clear" onclick="clearDebug()">清空</button>
+    </div>
+  </div>
+  <div id="debug-content"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

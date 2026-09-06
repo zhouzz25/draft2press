@@ -1,0 +1,19 @@
+# 模型配置（复制为 config.toml 后修改）
+# endpoint = "https://api.deepseek.com/chat/completions"
+# model = "deepseek-v4-flash"
+# context_length = 64000
+# thinking_mode = false
+# temperature = 0.7
+# max_tokens = 100000
+
+# vision_model = "deepseek-v4-flash-vision-exp"
+# vision_max_tokens = 4000
+
+# wx_app_id = "your-app-id"
+# wx_app_secret = "your-app-secret"
+
+# token_budget = 100000
+
+# [pricing]
+# input_per_1k = 0.00027
+# output_per_1k = 0.0011
