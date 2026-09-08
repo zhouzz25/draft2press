@@ -5,7 +5,7 @@
 <p style="text-align:center;font-size:175%;color:#2e7d32;padding:30px 0 20px 0"><strong>标题</strong></p>
 
 小节标题（绿色圆角+叶子符号）：
-<p style="background:#e8f5e9;color:#1b5e20;display:inline-block;padding:5px 18px;font-size:112.5%;border-radius:20px;border:1px solid #c8e6c9"><strong>🌿 01 章节名</strong></p><br>
+<p style="text-align:center;margin:0"><span style="background:#e8f5e9;color:#1b5e20;display:inline-block;padding:5px 18px;font-size:112.5%;border-radius:20px;border:1px solid #c8e6c9"><strong>🌿 01 章节名</strong></span></p><br>
 
 正文（浅绿卡片+底部色条）：
 <p style="background:rgba(46,125,50,0.06);border-bottom:2px solid #66bb6a;padding:20px 20px 20px 20px;font-size:100%;line-height:2;letter-spacing:1px;color:#1b5e20;border-radius:6px 6px 0 0">&emsp;&emsp;正文内容</p><br>

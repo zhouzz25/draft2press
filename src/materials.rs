@@ -10,6 +10,8 @@ pub struct PhotoEntry {
     pub description: String,
     pub width: u32,
     pub height: u32,
+    /// 用户勾选的"必选"照片：排版时 AI 必须使用
+    pub required: bool,
 }
 
 pub struct Material {
@@ -184,7 +186,15 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+const MAX_PDF_BYTES: usize = 10 * 1024 * 1024;
+
 fn extract_pdf_text(data: &[u8]) -> Result<String> {
+    if data.len() > MAX_PDF_BYTES {
+        return Err(anyhow!(
+            "PDF 文件过大（{:.1} MB，超过 10 MB 限制），无法可靠解析。请将正文复制出来存成 .txt/.md 后上传",
+            data.len() as f64 / 1024.0 / 1024.0
+        ));
+    }
     use std::io::Write;
     let temp_path = std::env::temp_dir().join(format!("xiumi_pdf_{}.pdf", std::process::id()));
     {

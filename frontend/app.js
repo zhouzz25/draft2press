@@ -70,7 +70,13 @@ async function runSSE(url, body, onDone) {
 
 // === Materials ===
 setupDropzone('dropzone', 'file-input', async files => {
-  for (const f of files) { const fd = new FormData(); fd.append('file', f); try { await fetch('/api/materials', { method: 'POST', body: fd }); } catch { showToast('上传失败: ' + f.name, 'error'); } }
+  for (const f of files) {
+    const fd = new FormData(); fd.append('file', f);
+    try {
+      const r = await fetch('/api/materials', { method: 'POST', body: fd });
+      if (!r.ok) showToast(`上传失败：${f.name} — ${(await r.text()).slice(0, 200)}`, 'error');
+    } catch (e) { showToast(`上传失败: ${f.name} (${e})`, 'error'); }
+  }
   loadMaterials();
 });
 async function loadMaterials() {
@@ -185,15 +191,110 @@ function renderAnnotations() {
   });
 }
 function removeAnnotation(i) { annotations.splice(i, 1); renderAnnotations(); highlightAnnotations(); }
+let _diffRes;
+function showDiffModal(ann, oldText, newText) {
+  $('diff-quote').textContent = `原文片段：「${ann.selected_text}」\n修改意见：${ann.comment}`;
+  $('diff-content').innerHTML = renderDiff(buildDiff(oldText, newText));
+  $('diff-modal').classList.add('visible');
+  return new Promise(r => { _diffRes = r; });
+}
+function resolveDiff(v) {
+  if (!$('diff-modal').classList.contains('visible')) return;
+  $('diff-modal').classList.remove('visible');
+  if (_diffRes) { _diffRes(v || 'reject'); _diffRes = null; }
+}
+// Side-by-side paragraph diff: each row holds [old, new] cells so scopes can be
+// compared like a difftool; the two columns share one scroll container so they
+// stay perfectly aligned while scrolling.
+function buildDiff(oldStr, newStr) {
+  const A = oldStr.split('\n'), B = newStr.split('\n');
+  const n = A.length, m = B.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { ops.push(['=', A[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(['-', A[i]]); i++; }
+    else { ops.push(['+', B[j]]); j++; }
+  }
+  while (i < n) ops.push(['-', A[i++]]);
+  while (j < m) ops.push(['+', B[j++]]);
+  // zip consecutive '-' and '+' runs into aligned left/right rows
+  const pairs = [];
+  for (let k = 0; k < ops.length;) {
+    if (ops[k][0] === '=') { pairs.push([ops[k][1], ops[k][1], '=']); k++; continue; }
+    const dels = [], ins = [];
+    while (k < ops.length && ops[k][0] === '-') { dels.push(ops[k][1]); k++; }
+    while (k < ops.length && ops[k][0] === '+') { ins.push(ops[k][1]); k++; }
+    const count = Math.max(dels.length, ins.length);
+    for (let x = 0; x < count; x++) pairs.push([dels[x] ?? null, ins[x] ?? null, null]);
+  }
+  return pairs;
+}
+// Char-level diff inside one modified pair, so users see exactly which chars changed.
+function inlineMark(l, r) {
+  const a = Array.from(l), b = Array.from(r);
+  if (a.length * b.length > 200000) return [null, null];
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const segs = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { segs.push(['=', a[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { segs.push(['-', a[i]]); i++; }
+    else { segs.push(['+', b[j]]); j++; }
+  }
+  while (i < n) segs.push(['-', a[i++]]);
+  while (j < m) segs.push(['+', b[j++]]);
+  let lh = '', rh = '';
+  for (let k = 0; k < segs.length;) {
+    const t = segs[k][0];
+    let run = '';
+    while (k < segs.length && segs[k][0] === t) { run += segs[k][1]; k++; }
+    if (t === '-') lh += `<span class="chg-del">${esc(run)}</span>`;
+    else if (t === '+') rh += `<span class="chg-add">${esc(run)}</span>`;
+    else { lh += esc(run); rh += esc(run); }
+  }
+  return [lh, rh];
+}
+function diffCell(cls, html) { return `<div class="dc ${cls}">${html}</div>`; }
+function renderDiff(pairs) {
+  return pairs.map(([l, r]) => {
+    if (l === null) return `<div class="diff-row">${diffCell('d-dim', '&nbsp;')}${diffCell('d-add', esc(r))}</div>`;
+    if (r === null) return `<div class="diff-row">${diffCell('d-del', esc(l))}${diffCell('d-dim', '&nbsp;')}</div>`;
+    if (l === r) return `<div class="diff-row">${diffCell('d-eq', esc(l))}${diffCell('d-eq', esc(r))}</div>`;
+    const [lh, rh] = inlineMark(l, r);
+    if (lh === null) return `<div class="diff-row">${diffCell('d-mod', esc(l))}${diffCell('d-add', esc(r))}</div>`;
+    return `<div class="diff-row">${diffCell('d-mod', lh)}${diffCell('d-add', rh)}</div>`;
+  }).join('');
+}
 async function submitAllAnnotations() {
   if (!annotations.length) return showToast('请先添加批注', 'warning');
   const empty = annotations.filter(a => !a.comment.trim());
-  if (empty.length && !await showConfirm(`有 ${empty.length} 条批注未填写意见，是否跳过？`)) return;
+  if (empty.length && !await showConfirm(`有 ${empty.length} 条批注未填写意见，将跳过它们。是否继续？`)) return;
   const valid = annotations.filter(a => a.comment.trim());
-  await runSSE('/api/revise', { draft: currentDraft, annotations: valid }, d => {
-    currentDraft = d.content; renderArticle(d.content); logApiCall('修订', d);
-    annotations = []; renderAnnotations();
-  });
+  let kept = currentDraft, applied = 0;
+  for (let i = 0; i < valid.length; i++) {
+    showLoading(true); showProgress(`正在处理第 ${i + 1}/${valid.length} 条批注...`);
+    let revised = null, data = null;
+    try {
+      await streamSSE('/api/revise', { draft: kept, annotation: valid[i] }, showProgress, d => { revised = d.content; data = d; }, m => showToast(m, 'error'));
+    } catch (e) { showToast(e.message, 'error'); }
+    showLoading(false);
+    if (!revised) { showToast('批注修订失败，已停止处理', 'error'); break; }
+    if (revised === kept) { showToast(`第 ${i + 1} 条批注未产生修改，已跳过`, 'warning'); continue; }
+    updateStats(); logApiCall('修订', data);
+    const choice = await showDiffModal(valid[i], kept, revised);
+    if (choice === 'accept') { kept = revised; applied++; }
+    if (choice === 'stop') break;
+  }
+  if (kept !== currentDraft) { currentDraft = kept; renderArticle(kept); }
+  annotations = []; renderAnnotations();
+  showToast(`批注处理完成，接受 ${applied}/${valid.length} 条`, 'success');
 }
 
 // === Stats ===
@@ -207,14 +308,38 @@ async function updateStats() {
 }
 
 // === Settings ===
+// Pricing unit conversion: server stores USD per 1K tokens
+const PRICE_RATE = { usd_1k: 1, usd_1m: 0.001, cny_1k: 1 / 7.2, cny_1m: 1 / (7.2 * 1000) };
+const priceUnit = () => $('cfg-price-unit').value;
+function setPriceUnit(u) { $('cfg-price-unit').value = u; localStorage.setItem('price-unit', u); }
+// Show/hide for any masked config input (API key, vision key, secrets...)
+function toggleKeyVisible(inputId, btnId) {
+  const i = $(inputId || 'cfg-api-key'), b = $(btnId || 'cfg-key-eye');
+  const show = i.type === 'password';
+  i.type = show ? 'text' : 'password';
+  b.textContent = show ? '隐藏' : '显示';
+}
+// Switching unit live-converts the displayed values so the stored USD/1K figure stays unchanged
+$('cfg-price-unit').onchange = () => {
+  const old = localStorage.getItem('price-unit') || 'usd_1k', nu = priceUnit();
+  const f = PRICE_RATE[old] / PRICE_RATE[nu];
+  for (const id of ['cfg-input-price', 'cfg-output-price']) {
+    const v = parseFloat($(id).value);
+    if (!isNaN(v)) $(id).value = +(v * f).toFixed(6);
+  }
+  setPriceUnit(nu);
+};
 async function openSettings() {
   const c = await (await fetch('/api/config')).json();
+  setPriceUnit(localStorage.getItem('price-unit') || 'usd_1k');
+  const r = PRICE_RATE[priceUnit()];
   $('cfg-endpoint').value = c.endpoint || ''; $('cfg-model').value = c.model || '';
   $('cfg-context-length').value = c.context_length || ''; $('cfg-max-tokens').value = c.max_tokens || '';
   $('cfg-temperature').value = c.temperature || '';
   $('cfg-thinking-mode').value = c.thinking_mode ? 'true' : 'false';
-  $('cfg-input-price').value = c.pricing?.input_per_1k ?? ''; $('cfg-output-price').value = c.pricing?.output_per_1k ?? '';
-  $('cfg-api-key').value = ''; $('cfg-key-current').textContent = '当前: ' + c.api_key_masked;
+  $('cfg-input-price').value = c.pricing?.input_per_1k ? +(c.pricing.input_per_1k / r).toFixed(6) : '';
+  $('cfg-output-price').value = c.pricing?.output_per_1k ? +(c.pricing.output_per_1k / r).toFixed(6) : '';
+  $('cfg-api-key').value = ''; $('cfg-key-current').textContent = '当前: ' + (c.api_key_configured ? '已配置' : '未配置');
   $('cfg-vision-endpoint').value = c.vision_endpoint || '';
   $('cfg-vision-model').value = c.vision_model || '';
   $('cfg-vision-max-tokens').value = c.vision_max_tokens || '';
@@ -228,12 +353,14 @@ async function openSettings() {
 }
 function cfgForm() {
   const v = id => $(id).value.trim(); const n = id => parseFloat($(id).value) || null;
+  const r = PRICE_RATE[priceUnit()];
+  const conv = x => x === null ? null : +(x * r).toFixed(6);
   return {
     endpoint: v('cfg-endpoint') || null, model: v('cfg-model') || null,
     context_length: n('cfg-context-length'), max_tokens: n('cfg-max-tokens'),
     temperature: n('cfg-temperature'), thinking_mode: $('cfg-thinking-mode').value === 'true',
     api_key: v('cfg-api-key') || null,
-    pricing: { input_per_1k: n('cfg-input-price'), output_per_1k: n('cfg-output-price') },
+    pricing: { input_per_1k: conv(n('cfg-input-price')), output_per_1k: conv(n('cfg-output-price')) },
     vision_endpoint: v('cfg-vision-endpoint') || null,
     vision_api_key: v('cfg-vision-key') || null,
     vision_model: v('cfg-vision-model') || null,
@@ -343,15 +470,33 @@ setupDropzone('fmt-photo-dropzone', 'fmt-photo-input', async files => {
 async function loadFormatPhotos() {
   const list = await (await fetch('/api/photos')).json();
   photoData = list;
-  $('fmt-photos').innerHTML = list.map((p, i) =>
+  $('photo-all').checked = list.length > 0 && list.every(p => p.required);
+  $('fmt-photos').innerHTML = list.map(p =>
     `<div class="fmt-photo-row" data-name="${eAttr(p.name)}" style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px">` +
     `<div class="photo-item" style="flex-shrink:0;cursor:pointer" onclick="openImageModal('${eAttr(p.name)}')">` +
     `<img src="/api/photo-img/${encodeURIComponent(p.name)}"><button class="photo-del" onclick="event.stopPropagation();removePhoto('${eAttr(p.name)}')">✕</button></div>` +
     `<div style="flex:1;display:flex;flex-direction:column;gap:4px">` +
     `<input type="text" class="photo-desc-input" value="${esc(p.description)}" placeholder="描述照片内容" onchange="updatePhotoDesc('${eAttr(p.name)}',this.value)" style="font-size:13px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;outline:none">` +
-    `<button class="secondary photo-recognize-btn" data-name="${eAttr(p.name)}" onclick="recognizePhoto('${eAttr(p.name)}',this)" style="font-size:12px;padding:4px 8px;width:auto">AI 识图</button>` +
-    `</div></div>`
+    `<div style="display:flex;gap:6px;align-items:center">` +
+    `<button class="secondary photo-recognize-btn" data-name="${eAttr(p.name)}" onclick="recognizePhoto('${eAttr(p.name)}',this)" style="font-size:12px;padding:4px 8px;flex:1">AI 识图</button>` +
+    `<label class="req-toggle" style="display:flex;align-items:center;gap:3px;font-size:12px;color:var(--tl);cursor:pointer;white-space:nowrap"><input type="checkbox" ${p.required ? 'checked' : ''} onchange="setPhotoRequired('${eAttr(p.name)}',this.checked)">必选</label>` +
+    `</div></div></div>`
   ).join('');
+}
+async function setPhotoRequired(name, v) {
+  const p = photoData.find(x => x.name === name);
+  if (p) p.required = v;
+  $('photo-all').checked = photoData.length > 0 && photoData.every(x => x.required);
+  await fetch('/api/photos/' + encodeURIComponent(name) + '/required', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ required: v }) });
+  showToast(v ? `已将「${name}」设为必选` : `已取消「${name}」必选`, 'info');
+}
+async function toggleAllPhotos(v) {
+  for (const p of photoData) {
+    p.required = v;
+    document.querySelectorAll(`.fmt-photo-row[data-name="${p.name.replace(/"/g, '&quot;')}"] .req-toggle input`).forEach(cb => { cb.checked = v; });
+    await fetch('/api/photos/' + encodeURIComponent(p.name) + '/required', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ required: v }) });
+  }
+  showToast(v ? '已全选：所有照片将用于排版' : '已全不选：照片由 AI 自主取舍', 'info');
 }
 
 function openImageModal(name) {
@@ -582,7 +727,7 @@ async function loadSession(id) {
 
 // === Listeners ===
 $('topic').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); } });
-for (const [id, fn] of [['confirm-modal', () => resolveConfirm(false)], ['session-modal', closeSessionList]])
+for (const [id, fn] of [['diff-modal', () => resolveDiff('reject')], ['confirm-modal', () => resolveConfirm(false)], ['session-modal', closeSessionList]])
   $(id).addEventListener('click', e => { if (e.target === $(id)) fn(); });
 
 // Init

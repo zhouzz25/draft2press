@@ -45,24 +45,16 @@ pub struct Annotation {
 pub fn build_revision_messages(draft: &str, annotations: &[Annotation]) -> Vec<Message> {
     let system = Message::system(read_prompt("revision_system.md"));
 
-    let annotations_text = annotations
-        .iter()
-        .enumerate()
-        .map(|(i, ann)| {
-            format!(
-                "批注 {}：\n  原文片段：「{}」\n  修改意见：{}\n",
-                i + 1,
-                ann.selected_text,
-                ann.comment
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (selected_text, comment) = annotations
+        .first()
+        .map(|a| (a.selected_text.as_str(), a.comment.as_str()))
+        .unwrap_or(("", ""));
 
     let template = read_prompt("revision_user.md");
     let user_content = template
         .replace("{draft}", draft)
-        .replace("{annotations}", &annotations_text);
+        .replace("{selected_text}", selected_text)
+        .replace("{comment}", comment);
 
     vec![system, Message::user(user_content)]
 }

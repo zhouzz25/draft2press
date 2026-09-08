@@ -103,7 +103,11 @@
     <div class="format-layout">
       <div class="format-side">
         <div class="format-panel">
-        <div class="section-title">配图（可选）</div>
+        <div class="section-title" style="margin-top:6px">配图（可选）</div>
+        <div class="sel-all-row">
+          <label><input type="checkbox" id="photo-all" onchange="toggleAllPhotos(this.checked)"> 全选必选</label>
+          <span class="hint">必选照片一定会用于排版，其余由 AI 自主取舍</span>
+        </div>
         <div class="dropzone dropzone-compact" id="fmt-photo-dropzone">
           <p>拖拽照片上传</p>
           <p class="hint">AI 将根据文件名和文章内容选择配图位置</p>
@@ -153,7 +157,7 @@
     </div>
     <div id="sel-indicator" class="sel-indicator">未选中文字</div>
     <div id="annot-list" class="annot-list"></div>
-    <button class="primary" id="submit-annot-btn" onclick="submitAllAnnotations()" style="display:none">提交全部批注</button>
+    <button class="primary" id="submit-annot-btn" onclick="submitAllAnnotations()" style="display:none">逐条处理批注</button>
   </div>
 </div>
 
@@ -172,8 +176,8 @@
           <input type="text" id="cfg-endpoint" placeholder="https://api.deepseek.com/chat/completions">
         </div>
         <div class="field">
-          <label>API Key <span class="required">*</span>（留空则不修改）</label>
-          <input type="text" id="cfg-api-key" placeholder="sk-...">
+          <label>API Key（留空则不修改，保存后不回显）&nbsp;<button type="button" id="cfg-key-eye" onclick="toggleKeyVisible('cfg-api-key','cfg-key-eye')" style="font-size:11px;padding:1px 8px;cursor:pointer;background:none;border:1px solid var(--border-strong);border-radius:5px;color:var(--tl)">显示</button></label>
+          <input type="password" id="cfg-api-key" placeholder="sk-..." autocomplete="off">
           <span class="hint" id="cfg-key-current"></span>
         </div>
         <div class="field">
@@ -203,13 +207,22 @@
             </select>
           </div>
         </div>
+        <div class="field">
+          <label>价格单位（应用于下方输入/输出价格）</label>
+          <select id="cfg-price-unit">
+            <option value="usd_1k">USD / 1K tokens</option>
+            <option value="usd_1m">USD / 1M tokens</option>
+            <option value="cny_1k">CNY / 1K tokens</option>
+            <option value="cny_1m">CNY / 1M tokens</option>
+          </select>
+        </div>
         <div class="btn-row">
           <div class="field" style="flex:1">
-            <label>输入价格 ($/1K token)</label>
+            <label>输入价格</label>
             <input type="number" id="cfg-input-price" step="0.0001" placeholder="0.00027">
           </div>
           <div class="field" style="flex:1">
-            <label>输出价格 ($/1K token)</label>
+            <label>输出价格</label>
             <input type="number" id="cfg-output-price" step="0.0001" placeholder="0.0011">
           </div>
         </div>
@@ -222,8 +235,8 @@
           <input type="text" id="cfg-vision-endpoint" placeholder="https://api.openai.com/v1/chat/completions">
         </div>
         <div class="field">
-          <label>Vision API Key（留空则用上方 key）</label>
-          <input type="text" id="cfg-vision-key" placeholder="sk-...">
+          <label>Vision API Key（留空则用上方 key，可切换明暗）&nbsp;<button type="button" id="cfg-vision-eye" onclick="toggleKeyVisible('cfg-vision-key','cfg-vision-eye')" style="font-size:11px;padding:1px 8px;cursor:pointer;background:none;border:1px solid var(--border-strong);border-radius:5px;color:var(--tl)">显示</button></label>
+          <input type="password" id="cfg-vision-key" placeholder="sk-...">
         </div>
         <div class="field">
           <label>Vision 模型名称</label>
@@ -273,6 +286,26 @@
   <div class="img-wrap">
     <img id="image-large">
     <p id="image-desc-large"></p>
+  </div>
+</div>
+
+<div id="diff-modal" class="modal">
+  <div class="modal-content diff">
+    <div class="modal-header">
+      <h2>批注修订预览</h2>
+      <button class="modal-close" onclick="resolveDiff('reject')">&times;</button>
+    </div>
+    <div class="modal-body diff-body">
+      <div id="diff-quote" class="diff-quote"></div>
+      <div class="diff-grid">
+        <div class="diff-head"><div>原文</div><div>修改后</div></div>
+        <div id="diff-content"></div>
+      </div>
+    </div>    <div class="modal-footer confirm-footer" style="display:flex;gap:10px">
+      <button class="secondary" onclick="resolveDiff('stop')">停止处理</button>
+      <button class="secondary" onclick="resolveDiff('reject')">放弃，继续下一条</button>
+      <button class="primary" onclick="resolveDiff('accept')">接受修改</button>
+    </div>
   </div>
 </div>
 

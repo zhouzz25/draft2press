@@ -5,7 +5,7 @@
 <p style="text-align:center;font-size:175%;color:#4a6cf7;padding:30px 0 20px 0"><strong>标题</strong></p>
 
 小节标题（蓝底白字横条）：
-<p style="background:#4a6cf7;color:#fff;display:block;padding:6px 16px;font-size:112.5%;border-radius:2px"><strong>01 章节名</strong></p><br>
+<p style="text-align:center;margin:0"><span style="background:#4a6cf7;color:#fff;display:inline-block;padding:6px 16px;font-size:112.5%;border-radius:4px"><strong>01 章节名</strong></span></p><br>
 
 正文（浅蓝卡片背景+圆角）：
 <p style="background:rgba(74,108,247,0.06);padding:20px 20px 20px 20px;font-size:100%;line-height:2;letter-spacing:1px;color:#3e3e3e;border-radius:6px">&emsp;&emsp;正文内容</p><br>

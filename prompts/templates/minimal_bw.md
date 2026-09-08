@@ -5,7 +5,7 @@
 <p style="text-align:center;font-size:175%;color:#222;padding:30px 0 20px 0;letter-spacing:2px"><strong>标题</strong></p>
 
 小节标题（左侧粗竖条+序号）：
-<p style="font-size:112.5%;color:#222;padding:6px 0 6px 14px;border-left:4px solid #222"><strong>01 章节名</strong></p><br>
+<p style="text-align:center;margin:0"><span style="display:inline-block;font-size:112.5%;color:#222;padding:6px 0 6px 14px;border-left:4px solid #222"><strong>01 章节名</strong></span></p><br>
 
 正文（无背景，仅靠间距和留白）：
 <p style="font-size:100%;line-height:2;letter-spacing:1px;color:#222;padding:8px 4px">&emsp;&emsp;正文内容</p><br>

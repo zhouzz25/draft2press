@@ -10,6 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -75,7 +76,7 @@ struct WriteRequest {
 #[derive(Deserialize)]
 struct ReviseRequest {
     draft: String,
-    annotations: Vec<AnnotationItem>,
+    annotation: AnnotationItem,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -139,6 +140,7 @@ pub async fn run_server(config: ModelConfig, port: u16) -> anyhow::Result<()> {
         .route("/api/photos/{name}", post(remove_photo))
         .route("/api/photo-img/{name}", get(serve_photo_img))
         .route("/api/photos/{name}/description", post(update_photo_description))
+        .route("/api/photos/{name}/required", post(set_photo_required))
         .route("/api/write", post(write_article))
         .route("/api/revise", post(revise_article))
         .route("/api/format", post(format_article))
@@ -271,22 +273,53 @@ fn error_event(msg: &str) -> Result<Event, Infallible> {
         .data(serde_json::json!({ "msg": msg }).to_string()))
 }
 
+// Runs an LLM call as a cancellable SSE task with streaming progress:
+// a ticker task samples the generated-char counter every 500ms and pushes
+// progress events ("已生成 N 字...") while the stream is alive.
 async fn run_llm_with_cancel(
     state: &AppState, tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-    client: LlmClient, messages: &[crate::llm::Message],
+    client: LlmClient, messages: Vec<crate::llm::Message>,
 ) -> Option<crate::llm::LlmResponse> {
+    let n = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     { let mut g = state.cancel_tx.lock().await; *g = Some(cancel_tx); }
-    let result = tokio::select! {
-        r = client.chat(messages) => match r {
-            Ok(r) => r,
-            Err(e) => { let _ = tx.send(error_event(&e.to_string())).await; return None; }
-        },
-        _ = cancel_rx => { let _ = tx.send(Ok(Event::default().event("cancelled").data("{}"))).await; return None; }
+    let ticker_tx = tx.clone();
+    let n2 = n.clone();
+    let ticker = tokio::spawn(async move {
+        let mut last = (0usize, 0usize);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let cur = (n2.0.load(Ordering::Relaxed), n2.1.load(Ordering::Relaxed));
+            if cur == last { continue; }
+            last = cur;
+            let msg = if cur.0 > 0 { format!("已生成 {} 字...", cur.0) } else { format!("思考中 {} 字...", cur.1) };
+            if ticker_tx.send(progress_event(&msg)).await.is_err() { break; }
+        }
+    });
+    // All select branches fall through to ticker.abort() so the sender is always
+    // dropped and the SSE stream can terminate (otherwise cancel would hang).
+    let outcome = tokio::select! {
+        r = client.chat_stream(&messages, move |p| { n.0.store(p.content, Ordering::Relaxed); n.1.store(p.reasoning, Ordering::Relaxed); }) => Ok(r),
+        _ = cancel_rx => Err(()),
     };
+    ticker.abort();
+    { let mut g = state.cancel_tx.lock().await; *g = None; }
+    let result = match outcome {
+        Err(_) => {
+            let _ = tx.send(Ok(Event::default().event("cancelled").data("{}"))).await;
+            return None;
+        }
+        Ok(Err(e)) => {
+            let _ = tx.send(error_event(&e.to_string())).await;
+            return None;
+        }
+        Ok(Ok(r)) => r,
+    };
+    if result.usage.total_tokens == 0 {
+        eprintln!("[llm] 该端点流式响应未返回 usage，本次调用未计入 Token 统计");
+    }
     { let mut t = state.cost_tracker.lock().await; t.record(&result.usage); }
     if check_budget(state, tx).await { return None; }
-    { let mut g = state.cancel_tx.lock().await; *g = None; }
     Some(result)
 }
 
@@ -309,7 +342,7 @@ async fn write_article(
         send_progress(&tx, "正在调用 AI 模型，请稍候...").await;
         let config = state_c.config.read().await.clone();
         let client = LlmClient::new(config);
-        let response = match run_llm_with_cancel(&state_c, &tx, client, &messages).await { Some(r) => r, None => return };
+        let response = match run_llm_with_cancel(&state_c, &tx, client, messages.clone()).await { Some(r) => r, None => return };
         let _ = tx.send(progress_event("生成完成，正在处理结果...")).await;
         let _ = tx.send(done_event(WriteResponse { content: response.content, usage: response.usage, debug_messages: messages })).await;
     });
@@ -325,12 +358,12 @@ async fn revise_article(
     let draft = req.draft.clone();
     tokio::spawn(async move {
         send_progress(&tx, "正在构建批注修订 Prompt...").await;
-        let annotations: Vec<Annotation> = req.annotations.into_iter().map(|a| Annotation { selected_text: a.selected_text, comment: a.comment }).collect();
-        let messages = build_revision_messages(&draft, &annotations);
-        send_progress(&tx, &format!("正在调用 AI 模型修订文章（{} 条批注）...", annotations.len())).await;
+        let ann = Annotation { selected_text: req.annotation.selected_text, comment: req.annotation.comment };
+        let messages = build_revision_messages(&draft, std::slice::from_ref(&ann));
+        send_progress(&tx, "正在调用 AI 模型处理本条批注...").await;
         let config = state_c.config.read().await.clone();
         let client = LlmClient::new(config);
-        let response = match run_llm_with_cancel(&state_c, &tx, client, &messages).await { Some(r) => r, None => return };
+        let response = match run_llm_with_cancel(&state_c, &tx, client, messages.clone()).await { Some(r) => r, None => return };
         let content = if response.content.is_empty() { draft } else { response.content };
         let _ = tx.send(done_event(WriteResponse { content, usage: response.usage, debug_messages: messages })).await;
     });
@@ -349,12 +382,7 @@ async fn cancel_task(State(state): State<AppState>) -> StatusCode {
 
 async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.config.read().await;
-    let key = &config.api_key;
-    let masked = if key.len() > 8 {
-        format!("{}...{}", &key[..4], &key[key.len() - 4..])
-    } else {
-        "***".to_string()
-    };
+    // API key 不回显（连掩码也不给，避免任何字节泄漏），只暴露是否已配置
     Json(serde_json::json!({
         "endpoint": config.endpoint,
         "model": config.model,
@@ -362,7 +390,7 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "thinking_mode": config.thinking_mode,
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
-        "api_key_masked": masked,
+        "api_key_configured": !config.api_key.is_empty(),
         "pricing": {
             "input_per_k": config.pricing.input_per_1k,
             "output_per_1k": config.pricing.output_per_1k,
@@ -501,6 +529,7 @@ struct PhotoInfo {
     description: String,
     width: u32,
     height: u32,
+    required: bool,
 }
 
 async fn list_photos(State(state): State<AppState>) -> Json<Vec<PhotoInfo>> {
@@ -513,6 +542,7 @@ async fn list_photos(State(state): State<AppState>) -> Json<Vec<PhotoInfo>> {
             description: p.description.clone(),
             width: p.width,
             height: p.height,
+            required: p.required,
         })
         .collect();
     Json(list)
@@ -552,7 +582,7 @@ async fn upload_photo(
     if let Some((filename, data_url)) = file {
         let mut photos = state.photos.lock().await;
         photos.retain(|p| p.name != filename);
-        photos.push(PhotoEntry { name: filename, data_url, description: String::new(), width, height });
+        photos.push(PhotoEntry { name: filename, data_url, description: String::new(), width, height, required: false });
     }
     Ok(StatusCode::OK)
 }
@@ -615,6 +645,27 @@ async fn update_photo_description(
     let mut photos = state.photos.lock().await;
     if let Some(photo) = photos.iter_mut().find(|p| p.name == name) {
         photo.description = req.description;
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+#[derive(Deserialize)]
+struct RequiredUpdate {
+    required: bool,
+}
+
+/// 通用的图片筛选方式：用户可勾选"必选"，全选时所有照片都会被 AI 用于排版，
+/// 未勾选的照片则由 AI 按文章内容自行取舍
+async fn set_photo_required(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<RequiredUpdate>,
+) -> StatusCode {
+    let mut photos = state.photos.lock().await;
+    if let Some(photo) = photos.iter_mut().find(|p| p.name == name) {
+        photo.required = req.required;
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -745,7 +796,7 @@ async fn format_article(
     let state_c = state.clone();
     tokio::spawn(async move {
         let photos = state_c.photos.lock().await;
-        let photo_refs: Vec<PhotoRef> = photos.iter().map(|p| PhotoRef { name: p.name.clone(), description: p.description.clone(), width: p.width, height: p.height }).collect();
+        let photo_refs: Vec<PhotoRef> = photos.iter().map(|p| PhotoRef { name: p.name.clone(), description: p.description.clone(), width: p.width, height: p.height, required: p.required }).collect();
         drop(photos);
         send_progress(&tx, &format!("正在准备排版（{} 张可选照片）...", photo_refs.len())).await;
         let task = FormatTask { draft: req.draft, photos: photo_refs, template: req.template };
@@ -753,7 +804,7 @@ async fn format_article(
         send_progress(&tx, "正在调用 AI 生成排版 HTML...").await;
         let config = state_c.config.read().await.clone();
         let client = LlmClient::new(config);
-        let response = match run_llm_with_cancel(&state_c, &tx, client, &messages).await { Some(r) => r, None => return };
+        let response = match run_llm_with_cancel(&state_c, &tx, client, messages.clone()).await { Some(r) => r, None => return };
         let html = extract_html(&response.content);
         if html.is_empty() { let _ = tx.send(error_event("排版结果为空，可能是 max_tokens 不足或模型未输出 HTML。")).await; return; }
         let _ = tx.send(progress_event("排版完成")).await;
@@ -813,7 +864,7 @@ async fn save_session(
             serde_json::json!({"name": m.name, "content": m.content, "size": m.size})
         }).collect::<Vec<_>>(),
         "photos": photos.iter().map(|p| {
-            serde_json::json!({"name": p.name, "data_url": p.data_url, "description": p.description, "width": p.width, "height": p.height})
+            serde_json::json!({"name": p.name, "data_url": p.data_url, "description": p.description, "width": p.width, "height": p.height, "required": p.required})
         }).collect::<Vec<_>>(),
         "stats": {
             "call_count": tracker.call_count,
@@ -889,7 +940,8 @@ async fn load_session(
             let description = p.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
             let width = p.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
             let height = p.get("height").and_then(|h| h.as_u64()).unwrap_or(0) as u32;
-            photos_state.push(PhotoEntry { name, data_url, description, width, height });
+            let required = p.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
+            photos_state.push(PhotoEntry { name, data_url, description, width, height, required });
         }
     }
 
@@ -907,7 +959,7 @@ async fn load_session(
     let materials = state.materials.lock().await;
     let photos = state.photos.lock().await;
     let mat_list: Vec<MaterialInfo> = materials.iter().map(|m| MaterialInfo { name: m.name.clone(), size: m.size }).collect();
-    let photo_list: Vec<PhotoInfo> = photos.iter().map(|p| PhotoInfo { name: p.name.clone(), data_url: p.data_url.clone(), description: p.description.clone(), width: p.width, height: p.height }).collect();
+    let photo_list: Vec<PhotoInfo> = photos.iter().map(|p| PhotoInfo { name: p.name.clone(), data_url: p.data_url.clone(), description: p.description.clone(), width: p.width, height: p.height, required: p.required }).collect();
 
     Ok(Json(SessionLoadResponse {
         topic,

@@ -5,7 +5,7 @@
 <p style="text-align:center;font-size:175%;color:#92400e;padding:30px 0 20px 0"><strong>标题</strong></p>
 
 小节标题（左色块+底虚线）：
-<p style="font-size:112.5%;color:#92400e;padding:6px 0 6px 12px;border-left:5px solid #d97706;border-bottom:1px dashed #d97706"><strong>01 章节名</strong></p><br>
+<p style="text-align:center;margin:0"><span style="display:inline-block;font-size:112.5%;color:#92400e;padding:6px 12px 6px 12px;border-left:5px solid #d97706;border-bottom:1px dashed #d97706"><strong>01 章节名</strong></span></p><br>
 
 正文（米黄卡片背景+左侧色条）：
 <p style="background:rgba(217,119,6,0.06);border-left:2px solid #fbbf24;padding:20px 20px 20px 20px 16px 16px 14px;font-size:100%;line-height:2;letter-spacing:1px;color:#3e3e3e;border-radius:0 6px 6px 0">&emsp;&emsp;正文内容</p><br>

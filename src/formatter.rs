@@ -37,6 +37,8 @@ pub struct PhotoRef {
     pub description: String,
     pub width: u32,
     pub height: u32,
+    /// 用户勾选的"必选"照片
+    pub required: bool,
 }
 
 /// 横图/竖图/方图标注，宽高未知时返回空串
@@ -78,11 +80,13 @@ impl FormatTask {
         user_content.push_str("\n\n");
 
         if !self.photos.is_empty() {
-            user_content.push_str("可选照片（请根据描述和文章内容选择合适配图位置，用 {{photo:文件名}} 标记）：\n");
+            user_content.push_str("照片列表（用 {{photo:文件名}} 标记配图位置）：\n");
             for p in &self.photos {
+                let tag = if p.required { "必选" } else { "可选" };
                 let desc = if p.description.is_empty() { "（无描述）" } else { &p.description };
-                user_content.push_str(&format!("- {}（{}）：{}\n", p.name, orientation(p.width, p.height), desc));
+                user_content.push_str(&format!("- {}（{}，{}）：{}\n", p.name, tag, orientation(p.width, p.height), desc));
             }
+            user_content.push_str("\n标记为「必选」的照片必须全部用上，放到文章最合适的位置；「可选」照片由你根据文章内容自行决定是否使用。\n");
         } else {
             user_content.push_str("（本次无照片提供）");
         }
