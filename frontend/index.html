@@ -122,6 +122,7 @@
             <option value="">AI 自动选择</option>
           </select>
         </div>
+        <button class="secondary block" onclick="openTplModal()">＋ AI 生成新模板</button>
         <button class="primary" onclick="formatArticle()">生成排版</button>
 
         <div id="format-actions" style="display:none">
@@ -218,12 +219,12 @@
         </div>
         <div class="btn-row">
           <div class="field" style="flex:1">
-            <label>输入价格</label>
-            <input type="number" id="cfg-input-price" step="0.0001" placeholder="0.00027">
+            <label>输入价格（留空=不修改）</label>
+            <input type="number" id="cfg-input-price" step="0.0001">
           </div>
           <div class="field" style="flex:1">
-            <label>输出价格</label>
-            <input type="number" id="cfg-output-price" step="0.0001" placeholder="0.0011">
+            <label>输出价格（留空=不修改）</label>
+            <input type="number" id="cfg-output-price" step="0.0001">
           </div>
         </div>
       </div>
@@ -286,6 +287,32 @@
   <div class="img-wrap">
     <img id="image-large">
     <p id="image-desc-large"></p>
+  </div>
+</div>
+
+<div id="tpl-modal" class="modal">
+  <div class="modal-content" style="width:480px">
+    <div class="modal-header">
+      <h2>AI 生成排版模板</h2>
+      <button class="modal-close" onclick="closeTplModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>风格描述（自然语言） <span class="required">*</span></label>
+        <textarea id="tpl-desc" rows="4" placeholder="例如：深色霓虹科技感，青紫渐变标题栏，适合数码测评类文章"></textarea>
+      </div>
+      <div class="field">
+        <label>模板参考链接（可选，网页/秀米，抓取内容作为风格参考）</label>
+        <input type="text" id="tpl-url" placeholder="https://...">
+      </div>
+      <div class="field">
+        <label>模板名（可选，留空自动命名 custom_xxx）</label>
+        <input type="text" id="tpl-name" placeholder="如：cyber_neon">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="primary" onclick="generateTemplate()">生成并保存模板</button>
+    </div>
   </div>
 </div>
 

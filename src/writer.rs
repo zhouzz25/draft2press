@@ -2,7 +2,7 @@ use crate::llm::Message;
 
 const PROMPTS_DIR: &str = "prompts";
 
-fn read_prompt(name: &str) -> String {
+pub fn read_prompt(name: &str) -> String {
     let path = format!("{PROMPTS_DIR}/{name}");
     std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("警告：读取 prompt 文件失败 {path}: {e}，使用空 prompt");

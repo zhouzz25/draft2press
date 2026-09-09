@@ -7,23 +7,42 @@ fn read_prompt(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
-fn read_templates() -> Vec<(String, String)> {
+/// 枚举模板：支持两种布局
+/// 1) 文件夹式（首选）：prompts/templates/{id}/template.md + assets/
+/// 2) 旧平铺兼容：prompts/templates/{id}.md
+pub fn all_template_id_dirs() -> Vec<(String, String)> {
     let dir = format!("{PROMPTS_DIR}/templates");
-    let mut templates = Vec::new();
+    let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_none_or(|e| e != "md") {
-                continue;
+            let Some(stem) = path.file_stem() else { continue };
+            let id = stem.to_string_lossy().to_string();
+            if path.is_dir() {
+                let inner = path.join("template.md");
+                if inner.exists() {
+                    out.push((id, inner.to_string_lossy().to_string()));
+                }
+            } else if path.extension().is_some_and(|e| e == "md") {
+                out.push((id, path.to_string_lossy().to_string()));
             }
-            let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let first_line = content.lines().next().unwrap_or("").to_string();
-            let desc = content.lines().find(|l| l.starts_with("适合")).unwrap_or("").to_string();
-            templates.push((name, format!("{first_line} {desc}")));
         }
     }
-    templates
+    out.sort();
+    out
+}
+
+/// Template id + display name (template.md first line) for /api/templates;
+/// scans both folder-style and legacy flat-md layouts.
+pub fn list_template_ids() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (id, md_path) in all_template_id_dirs() {
+        let content = std::fs::read_to_string(&md_path).unwrap_or_default();
+        let first = content.lines().next().map(str::trim).unwrap_or("");
+        let name = if first.is_empty() { id.clone() } else { first.to_string() };
+        out.push((id, name));
+    }
+    out
 }
 
 pub struct FormatTask {
@@ -60,19 +79,22 @@ impl FormatTask {
     pub fn build_messages(&self) -> Vec<Message> {
         let mut system = read_prompt("format_system.md");
 
-        let templates = read_templates();
-        if !templates.is_empty() {
-            system.push_str("\n\n可用模板（");
+        // 把每个模板的完整定义（样式片段 + 贴图素材用法）注入 system prompt，
+        // 让 AI 真正"看到"可照搬的样式细节，而不是只有一个名字
+        let template_ids = all_template_id_dirs();
+        if !template_ids.is_empty() {
+            system.push_str("\n\n可用模板库（");
             if let Some(t) = &self.template {
-                system.push_str(&format!("使用指定模板: {t}"));
+                system.push_str(&format!("用户已指定模板: {t}，必须沿用该模板的样式与贴图，不要改配色"));
             } else {
-                system.push_str("根据文章内容自动选择最合适的模板");
+                system.push_str("根据文章内容自动选择最合适的一个模板");
             }
             system.push_str("）：\n");
-            for (name, desc) in &templates {
-                system.push_str(&format!("- {name}: {desc}\n"));
+            for (id, md_path) in &template_ids {
+                let content = std::fs::read_to_string(md_path).unwrap_or_default();
+                system.push_str(&format!("\n====== 模板 {id} ======\n{content}\n"));
             }
-            system.push_str("\n请严格按照选中模板的配色和样式规范生成 HTML。");
+            system.push_str("\n请完整使用选中模板中的配色与 style 片段（照搬 style 属性值），贴图素材直接使用其 {{asset:...}} 占位符。");
         }
 
         let mut user_content = String::from("请将以下文章排版为公众号 HTML：\n\n");

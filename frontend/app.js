@@ -41,7 +41,7 @@ function download(content, name, type) {
 }
 
 // === SSE ===
-async function streamSSE(url, body, onP, onD, onE) {
+async function streamSSE(url, body, onP, onD, onE, onC) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const rd = r.body.getReader(); const d = new TextDecoder(); let b = '';
   for (;;) {
@@ -57,7 +57,7 @@ async function streamSSE(url, body, onP, onD, onE) {
       if (et === 'progress') onP(JSON.parse(data).msg);
       else if (et === 'done') onD(JSON.parse(data));
       else if (et === 'error') onE(JSON.parse(data).msg);
-      else if (et === 'cancelled') onE('已中断');
+      else if (et === 'cancelled') { onC ? onC() : onE('已中断'); }
     }
   }
 }
@@ -280,11 +280,16 @@ async function submitAllAnnotations() {
   let kept = currentDraft, applied = 0;
   for (let i = 0; i < valid.length; i++) {
     showLoading(true); showProgress(`正在处理第 ${i + 1}/${valid.length} 条批注...`);
-    let revised = null, data = null;
+    let revised = null, data = null, cancelled = false;
     try {
-      await streamSSE('/api/revise', { draft: kept, annotation: valid[i] }, showProgress, d => { revised = d.content; data = d; }, m => showToast(m, 'error'));
+      await streamSSE('/api/revise', { draft: kept, annotation: valid[i] }, showProgress,
+        d => { revised = d.content; data = d; },
+        m => showToast(m, 'error'),
+        () => { cancelled = true; });
     } catch (e) { showToast(e.message, 'error'); }
     showLoading(false);
+    // 中断 = 跳过本条，继续处理后面的批注（diff 弹窗里的「停止处理」才是全停）
+    if (cancelled) { showToast(`第 ${i + 1} 条批注已跳过（中断），继续下一条`, 'info'); continue; }
     if (!revised) { showToast('批注修订失败，已停止处理', 'error'); break; }
     if (revised === kept) { showToast(`第 ${i + 1} 条批注未产生修改，已跳过`, 'warning'); continue; }
     updateStats(); logApiCall('修订', data);
@@ -310,8 +315,15 @@ async function updateStats() {
 // === Settings ===
 // Pricing unit conversion: server stores USD per 1K tokens
 const PRICE_RATE = { usd_1k: 1, usd_1m: 0.001, cny_1k: 1 / 7.2, cny_1m: 1 / (7.2 * 1000) };
+// 示例单价（按当前单位换算）、让输入/输出框的占位符格式一致
+const PRICE_EXAMPLE = { usd_1k: { i: 0.00027, o: 0.0011 }, usd_1m: { i: 0.27, o: 1.1 }, cny_1k: { i: 0.00195, o: 0.00792 }, cny_1m: { i: 1.95, o: 7.92 } };
 const priceUnit = () => $('cfg-price-unit').value;
 function setPriceUnit(u) { $('cfg-price-unit').value = u; localStorage.setItem('price-unit', u); }
+function updatePricePlaceholders() {
+  const ex = PRICE_EXAMPLE[priceUnit()] || PRICE_EXAMPLE.usd_1k;
+  $('cfg-input-price').placeholder = String(ex.i);
+  $('cfg-output-price').placeholder = String(ex.o);
+}
 // Show/hide for any masked config input (API key, vision key, secrets...)
 function toggleKeyVisible(inputId, btnId) {
   const i = $(inputId || 'cfg-api-key'), b = $(btnId || 'cfg-key-eye');
@@ -328,10 +340,12 @@ $('cfg-price-unit').onchange = () => {
     if (!isNaN(v)) $(id).value = +(v * f).toFixed(6);
   }
   setPriceUnit(nu);
+  updatePricePlaceholders();
 };
 async function openSettings() {
   const c = await (await fetch('/api/config')).json();
   setPriceUnit(localStorage.getItem('price-unit') || 'usd_1k');
+  updatePricePlaceholders();
   const r = PRICE_RATE[priceUnit()];
   $('cfg-endpoint').value = c.endpoint || ''; $('cfg-model').value = c.model || '';
   $('cfg-context-length').value = c.context_length || ''; $('cfg-max-tokens').value = c.max_tokens || '';
@@ -437,19 +451,32 @@ function exitFormat() {
 }
 
 async function loadTemplates() {
-  const templates = [
-    { id: 'clean_blue', name: '蓝白简洁风' },
-    { id: 'warm_earth', name: '暖色大地风' },
-    { id: 'tech_dark', name: '深蓝科技风' },
-    { id: 'festival_red', name: '节日红色风' },
-    { id: 'minimal_bw', name: '黑白极简风' },
-    { id: 'fresh_green', name: '清新绿色风' },
-  ];
-  const sel = $('template-select');
-  sel.innerHTML = '<option value="">AI 自动选择</option>';
-  for (const t of templates) {
-    sel.innerHTML += `<option value="${t.id}">${t.name}</option>`;
-  }
+  try {
+    const list = await (await fetch('/api/templates')).json();
+    $('template-select').innerHTML = '<option value="">AI 自动选择</option>' +
+      list.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+  } catch (e) { showToast('模板列表加载失败: ' + e.message, 'error'); }
+}
+// AI 生成新模板：自然语言 + 可选参考链接 -> 保存为 custom_xxx 模板
+function openTplModal() {
+  $('tpl-desc').value = ''; $('tpl-url').value = ''; $('tpl-name').value = '';
+  $('tpl-modal').classList.add('visible');
+}
+function closeTplModal() { $('tpl-modal').classList.remove('visible'); }
+async function generateTemplate() {
+  const description = $('tpl-desc').value.trim();
+  if (!description) return showToast('请先描述想要的风格', 'warning');
+  closeTplModal();
+  showLoading(true); showProgress('正在让 AI 生成风格模板...');
+  try {
+    const r = await fetch('/api/templates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ description, url: $('tpl-url').value.trim() || null, name: $('tpl-name').value.trim() || null }) });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    showToast(`模板「${d.name}」已保存`, 'success');
+    await loadTemplates();
+    $('template-select').value = d.id;
+  } catch (e) { showToast('模板生成失败: ' + e.message, 'error'); }
+  showLoading(false);
 }
 setupDropzone('fmt-photo-dropzone', 'fmt-photo-input', async files => {
   for (const f of files) {
@@ -631,22 +658,49 @@ function replacePlaceholdersForPreview(html) {
     const img = `<img src="/api/photo-img/${encodeURIComponent(p.name)}" style="width:100%;border-radius:8px;margin:10px 0" />`;
     result = result.split(placeholder).join(img);
   }
+  // Template local assets preview: server serves them from prompts/templates/{id}/assets/
+  result = result.replace(/\{\{asset:([^}:]+)\/([^}]+)\}\}/g, (m, id, file) =>
+    `<img src="/api/assets/${encodeURIComponent(id)}/${encodeURIComponent(file)}" style="width:100%;display:block" />`);
   return result;
 }
 
+// Fetch template assets once and turn {{asset:...}} into base64 data URLs for clipboard copy
+async function buildAssetDataUrlMap(html) {
+  const map = {};
+  const re = /\{\{asset:([^}:]+)\/([^}]+)\}\}/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const id = m[1], file = m[2];
+    const key = `{{asset:${id}/${file}}}`;
+    if (key in map) continue;
+    try {
+      const r = await fetch(`/api/assets/${encodeURIComponent(id)}/${encodeURIComponent(file)}`);
+      if (!r.ok) throw 0;
+      const blob = await r.blob();
+      map[key] = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
+    } catch { map[key] = ''; }
+  }
+  return map;
+}
+
 // Replace {{photo:filename}} with base64 for clipboard copy (images travel with HTML)
-function replacePlaceholdersForCopy(html) {
+async function replacePlaceholdersForCopy(html, assetMap) {
   let result = html;
   for (const p of photoData) {
     const placeholder = `{{photo:${p.name}}}`;
     const img = `<img src="${p.data_url}" style="width:100%;border-radius:8px;margin:10px 0" />`;
     result = result.split(placeholder).join(img);
   }
+  for (const [placeholder, dataUrl] of Object.entries(assetMap)) {
+    const img = dataUrl ? `<img src="${dataUrl}" style="width:100%;display:block" />` : '';
+    result = result.split(placeholder).join(img);
+  }
   return result;
 }
-function copyHTML() {
+async function copyHTML() {
   if (!currentRawHTML) return showToast('暂无HTML', 'warning');
-  const htmlForCopy = getTypoStyleTag() + replacePlaceholdersForCopy(currentRawHTML);
+  const assetMap = await buildAssetDataUrlMap(currentRawHTML);
+  const htmlForCopy = getTypoStyleTag() + await replacePlaceholdersForCopy(currentRawHTML, assetMap);
   const div = document.createElement('div');
   div.contentEditable = 'true'; div.style.position = 'fixed'; div.style.left = '-9999px';
   div.innerHTML = htmlForCopy;
@@ -727,7 +781,7 @@ async function loadSession(id) {
 
 // === Listeners ===
 $('topic').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); } });
-for (const [id, fn] of [['diff-modal', () => resolveDiff('reject')], ['confirm-modal', () => resolveConfirm(false)], ['session-modal', closeSessionList]])
+for (const [id, fn] of [['tpl-modal', closeTplModal], ['diff-modal', () => resolveDiff('reject')], ['confirm-modal', () => resolveConfirm(false)], ['session-modal', closeSessionList]])
   $(id).addEventListener('click', e => { if (e.target === $(id)) fn(); });
 
 // Init

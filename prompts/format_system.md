@@ -41,15 +41,24 @@
 
 可读性（最重要）：公众号页面是白底，正文文字一律用深色；严禁大面积黑色/深色背景卡片，严禁浅灰/浅蓝等浅色文字做正文；深色只允许用于小节标题横条、色条、分隔线、强调文字
 
+装饰语言（让排版不"素"！用模板的主色/浅色，全部纯 CSS 可在公众号存活）：
+- 关键词高亮（每张卡 1-2 个即可）：正文里的关键词用 <strong style="color:#主色">关键词</strong>，重要的可加 border-bottom:2px solid rgba(主色,0.35)
+- 金句卡（每 2-3 张正文卡之间插一次，别滥用）：<p style="border-left:4px solid #主色;background:#浅色;padding:10px 14px;font-style:italic;color:#主色">「金句一句」</p><br>
+- 卡片开门装饰（每张正文卡开头放一次，紧贴文字前）：<span style="display:inline-block;width:36px;height:4px;background:#主色;border-radius:2px;vertical-align:middle">​</span><br>
+- 小节标题两侧小贴片：在标题 pill 内文字两侧各加一个同主色小圆点或小色块（如 <span style="display:inline-block;width:6px;height:6px;background:#主色;border-radius:50%;margin:0 8px;vertical-align:middle"></span>），有设计感又不突兀
+- 序号徽章：小节标题里的「01」用 <strong style="opacity:.6">01</strong> 弱化处理或加小底色区分
+- 结尾回顾（可选，文章最后、END 区之前）：<p style="text-align:center;font-size:90%;color:#浅色系深一点的色值">— 完 —</p>
+- 这些装饰是设计语言的一部分，使用要克制：单位是"点缀"，不是"堆满"
+- **贴纸像贴纸一样"贴"着用，不是插图！**{{asset:模板id/文件名}}（模板自带贴纸，本地保存）必须"贴"在别的元素上：
+  - 贴在标题药丸/卡片一角：外层锚点 position:relative，贴纸包在 position:absolute 的包装 span 里，
+    right/left/top 偏移 + transform:rotate(-12deg)~rotate(15deg) 歪一点，z-index:2 可微微压住标题一角
+  - 包装 span 给定宽度（24-96px），贴纸替换后的 <img> 按包装宽度缩放
+  - 浮层范式（可直接照搬）：
+    <p style="text-align:center;position:relative;margin:0"><span style="position:relative;display:inline-block;padding:0 8px"><span style="position:absolute;left:0;top:50%;margin-top:-12px;width:20px;height:24px;background:#垫块色;border-radius:12px 0 0 12px;opacity:.65"></span><span style="position:relative;background:#主色;color:#fff;display:inline-block;padding:7px 18px;font-size:112.5%;letter-spacing:2px;border-radius:16px"><strong>01 章节名</strong></span><span style="position:absolute;right:-14px;top:-12px;width:30px;z-index:2;transform:rotate(12deg)">{{asset:模板id/flower.gif}}</span></span></p><br>
+  - 唯一例外：模板用法明确写"开门主视觉/封面主贴"时才允许单独成段居中展示
+  - 全篇贴纸总数 3-6 个，出现位置必须在文字/卡片旁，绝不能出现「贴纸单独一段居中成图」；没有该段落则不使用也不虚构
+
 正文：font-size:16px;line-height:2;color:#3e3e3e，首行缩进 &emsp;&emsp;
 结束标记和署名区照模板样式
 
-模板：
-- clean_blue: 蓝白简洁风 主色#4a6cf7 浅色#e8eefe
-- warm_earth: 暖色大地风 主色#d97706 浅色#fff8e1
-- tech_dark: 深蓝科技风 主色#1565c0 深蓝#0d47a1 浅色#e3f2fd 正文#263238 辅色#00bcd4
-- festival_red: 节日红色风 主色#e53935 浅色#ffebee
-- minimal_bw: 黑白极简风 主色#222 浅色#f5f5f5
-- fresh_green: 清新绿色风 主色#2e7d32 浅色#e8f5e9
-
-照搬模板文件中的 style 属性值。
+照搬「可用模板库」中选中模板的 style 属性值与贴图素材用法（模板全文已逐字给出）。

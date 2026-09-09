@@ -61,7 +61,16 @@ impl WeChatClient {
     pub async fn push_draft(&self, title: &str, content: &str, photos: &[(String, Vec<u8>, String)]) -> Result<String> {
         let token = self.get_token().await?;
         if photos.is_empty() { return Err(anyhow!("需要至少一张照片作为封面图")); }
-        let cover_name = content.find("{{photo:").and_then(|s| content[s+8..].find("}}").map(|e| content[s+8..s+8+e].to_string())).unwrap_or_else(|| photos[0].0.clone());
+        // First {{photo:name}} that is a real photo, skipping template sticker pseudonyms
+        let mut cover_name = photos[0].0.clone();
+        let mut s = content;
+        while let Some(p) = s.find("{{photo:") {
+            let inner = &s[p + 8..];
+            let Some(e) = inner.find("}}") else { break };
+            let name = inner[..e].to_string();
+            if !name.starts_with("__tpl_asset_") { cover_name = name; break; }
+            s = &inner[e + 2..];
+        }
         eprintln!("[wechat] 封面: {cover_name}");
         let ci = photos.iter().position(|(n,_,_)| *n == cover_name).unwrap_or(0);
         let (cn, cd, cc) = &photos[ci];
@@ -74,7 +83,9 @@ impl WeChatClient {
         }
         let mut html = content.to_string();
         for (name, url) in &urls {
-            html = html.replace(&format!("{{{{photo:{name}}}}}"), &format!("<img src=\"{url}\" style=\"width:100%;border-radius:8px\" />"));
+            // 模板贴纸贴在 AI 的定位包装层内：让 img 跟随包装宽高，不做全宽卡图样式
+            let style = if name.starts_with("__tpl_asset_") { "width:100%;display:block" } else { "width:100%;border-radius:8px" };
+            html = html.replace(&format!("{{{{photo:{name}}}}}"), &format!("<img src=\"{url}\" style=\"{style}\" />"));
         }
         let html = compress_html(&html);
         let body = serde_json::json!({ "articles": [{ "title": title, "content": html, "thumb_media_id": thumb, "need_open_comment": 0, "only_fans_can_comment": 0 }] });

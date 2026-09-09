@@ -5,7 +5,7 @@ use axum::{
         sse::{Event, Sse},
         Html, IntoResponse, Json,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -149,6 +149,11 @@ pub async fn run_server(config: ModelConfig, port: u16) -> anyhow::Result<()> {
         .route("/api/cancel", post(cancel_task))
         .route("/api/config", get(get_config).post(update_config))
         .route("/api/settings/check", post(check_settings_dirty))
+        .route("/api/templates", get(list_templates).post(generate_template))
+        .route("/api/templates/{id}", delete(delete_template))
+        .route("/api/templates/{id}/asset", post(upload_template_asset))
+        .route("/api/templates/{id}/assets", get(list_template_assets))
+        .route("/api/assets/{id}/{file}", get(serve_asset))
         .route("/api/stats", get(get_stats))
         .route("/api/photos/{name}/recognize", post(recognize_photo))
         .route("/api/session", post(save_session))
@@ -486,6 +491,399 @@ async fn check_settings_dirty(
     if let Some(v) = &req.wx_app_secret { changed |= !v.is_empty(); }
     if let Some(v) = req.token_budget { changed |= c.token_budget != Some(v); }
     Json(serde_json::json!({ "changed": changed }))
+}
+
+// === Style templates: list / AI-generate from natural language + reference link / delete ===
+
+async fn list_templates() -> Json<serde_json::Value> {
+    let list = crate::formatter::list_template_ids()
+        .into_iter()
+        .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+        .collect::<Vec<_>>();
+    Json(serde_json::json!(list))
+}
+
+#[derive(Deserialize)]
+struct TemplateGenRequest {
+    description: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn sanitize_template_id(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let id = if cleaned.is_empty() {
+        format!("custom_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+    } else {
+        cleaned
+    };
+    if id.starts_with("custom_") { id } else { format!("custom_{id}") }
+}
+
+// Fetch a reference page: plain text for the LLM + decorative stickers (gif or small
+// width) candidates with their size hints. WeChat articles lazy-load via data-src.
+#[derive(Debug, Clone)]
+struct ImageCandidate {
+    url: String,
+    w: u32,
+    ratio: f64,
+}
+
+fn find_img_attr(tag: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let sp = tag.find(&needle)?;
+    let after = &tag[sp + needle.len()..];
+    let first = after.chars().next()?;
+    let (quote, off) = if first == '"' || first == '\'' { (first, 1) } else { (first, 0) };
+    let s = &after[off..];
+    let end = s.find(quote)?;
+    Some(s[..end].trim().to_string())
+}
+
+async fn fetch_page(url: &str) -> Result<(String, Vec<ImageCandidate>), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let html = client
+        .get(url)
+        .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        .header(header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (origin, page_dir) = {
+        let after_scheme = url.split("://").nth(1).unwrap_or(url);
+        let origin_end = after_scheme.find('/').map(|p| url.len() - after_scheme.len() + p).unwrap_or(url.len());
+        let origin = &url[..origin_end];
+        let page_dir = url.rsplit_once('/').map(|(a, _)| a.to_string()).unwrap_or_else(|| url.to_string());
+        (origin.to_string(), page_dir)
+    };
+
+    let mut imgs: Vec<ImageCandidate> = Vec::new();
+    let mut rest = html.as_str();
+    while imgs.len() < 16 && !rest.is_empty() {
+        let start = match rest.find("<img") { Some(p) => p, None => break };
+        let tail = &rest[start + 4..];
+        let len = tail.find('>').unwrap_or(0);
+        let tag = &tail[..len];
+        // WeChat lazy-loads real src in data-src; fall back to src. Also grab
+        // data-w/data-ratio so stickers (small width) can be told apart from content photos.
+        if let Some(raw) = find_img_attr(tag, "data-src").or_else(|| find_img_attr(tag, "src")) {
+            let src = if raw.starts_with("//") { format!("https:{raw}") }
+                else if raw.starts_with("http://") || raw.starts_with("https://") { raw.clone() }
+                else if raw.starts_with('/') { format!("{origin}{raw}") }
+                else { format!("{page_dir}/{raw}") };
+            if src.starts_with("http://") || src.starts_with("https://") {
+                let w = find_img_attr(tag, "data-w").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                let ratio = find_img_attr(tag, "data-ratio").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                imgs.push(ImageCandidate { url: src, w, ratio });
+            }
+        }
+        rest = &tail[len..];
+    }
+
+    let mut plain = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => plain.push(' '),
+            '>' => { plain.push(' '); in_tag = false; }
+            c if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+    let joined = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain: String = joined.chars().take(3000).collect();
+    if (html.contains("环境异常") || html.contains("该内容暂时无法浏览") || html.contains("request denied"))
+        && imgs.is_empty() && plain.chars().count() < 800 {
+        return Err("该链接被微信要求安全验证，抓不到正文和贴纸。请把文章正文直接粘贴到「风格描述」里，或换一篇可以直接打开的文章链接".into());
+    }
+    if plain.chars().count() < 200 && imgs.is_empty() {
+        return Err("参考页面内容过少（可能是保护页或空页），请换链接或直接粘贴正文".into());
+    }
+    // WeChat CDN sometimes blocks direct fetches; that's a real failure here
+    if imgs.len() >= 2 && html.contains("mmbiz.qpic.cn") {
+        // keep going: images may still be downloadable individually
+    }
+    Ok((plain, imgs))
+}
+
+// Stickers are tiny decorations: gif animations or small-width images.
+// Content photos (large width) are user-provided via {{photo:...}} and skipped here.
+fn is_sticker_candidate(c: &ImageCandidate) -> bool {
+    let fmt = fmt_kind(&c.url);
+    fmt == "gif" || (c.w > 0 && c.w <= 400)
+}
+
+// Get image kind. WeChat puts the real type in the wx_fmt query (path only has /640!),
+// and rewriting `tp=webp` makes bytes differ from the claimed type – strip it.
+fn fmt_kind(url: &str) -> String {
+    let query = url.split_once('?').map(|x| x.1).unwrap_or("");
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("wx_fmt=") {
+            return v.split('#').next().unwrap_or("").to_lowercase();
+        }
+    }
+    let path = url.split('?').next().unwrap_or("").split('#').next().unwrap_or(url);
+    path.rsplit('.').next().unwrap_or("").to_lowercase()
+}
+
+fn normalize_img_url(url: &str) -> String {
+    let no_frag = url.split_once('#').map(|(a, _)| a).unwrap_or(url);
+    if fmt_kind(no_frag) == "gif" {
+        no_frag.replace("&tp=webp", "").replace("?tp=webp&", "?").replace("&tp=webp&", "&").to_string()
+    } else {
+        no_frag.to_string()
+    }
+}
+
+async fn download_template_assets(id: &str, cands: &[ImageCandidate]) -> Vec<(String, u32, f64)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let mut saved: Vec<(String, u32, f64)> = Vec::new();
+    for c in cands.iter() {
+        if !is_sticker_candidate(c) { continue; }
+        let fmt = fmt_kind(&c.url);
+        if !matches!(fmt.as_str(), "png" | "gif" | "jpg" | "jpeg" | "webp") { continue; }
+        let dl_url = normalize_img_url(&c.url);
+        let Ok(r) = client.get(&dl_url).send().await else { eprintln!("[template] 贴纸下载请求失败: {dl_url}"); continue };
+        if !r.status().is_success() { eprintln!("[template] 贴纸下载非 2xx: {dl_url}"); continue; }
+        let ct_ok = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("image/")).unwrap_or(true);
+        if !ct_ok { continue; }
+        let Ok(bytes) = r.bytes().await else { continue };
+        if bytes.is_empty() || bytes.len() > 4_800_000 { continue; }
+        let file = format!("asset{}.{}", saved.len() + 1, fmt);
+        if save_asset(id, &file, &bytes).await.is_ok() {
+            eprintln!("[template] 已采集贴纸 {file}（{}KB，w={}）", bytes.len() / 1024, c.w);
+            saved.push((file, c.w, c.ratio));
+        }
+        if saved.len() >= 24 { break; }
+    }
+    saved
+}
+
+// Natural language (+optional reference URL) -> AI writes a template definition
+// in the exact same structure as prompts/templates/*.md -> saved as custom_xxx.md.
+// Decorative images collected from the reference page are saved LOCALLY under
+// prompts/templates/{id}/assets/ so no hotlinked external image ever ships –
+// the export pipeline translates {{asset:...}} into base64 / WeChat-uploaded URLs.
+async fn generate_template(
+    State(state): State<AppState>,
+    Json(req): Json<TemplateGenRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let desc = req.description.trim().to_string();
+    if desc.chars().count() < 6 {
+        return Err((StatusCode::BAD_REQUEST, "风格描述太短，请写清楚想要的颜色气质、用的场景等".into()));
+    }
+    let id = sanitize_template_id(req.name.as_deref().unwrap_or(""));
+
+    let mut user = format!("用户想要的模板风格：{desc}\n");
+    let mut asset_assets: Vec<(String, u32, f64)> = Vec::new();
+    if let Some(url) = req.url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let (text, cands) = fetch_page(url).await.map_err(|e| (StatusCode::BAD_REQUEST, format!("参考链接不可用：{e}")))?;
+        user.push_str(&format!("\n参考页面内容节选（参考其配色与气质）：\n{text}\n"));
+        asset_assets = download_template_assets(&id, &cands).await;
+        if !asset_assets.is_empty() {
+            user.push_str(&format!("\n以下贴纸素材已从参考页面采集并保存到本地（id={}）；注意大尺寸内容照片不会被采集（那类图排版时走 {{photo:...}}）。如需贴纸装饰，请直接嵌入这些占位符：\n{}", id, asset_placeholder_lines(&id, &asset_assets)));
+        }
+    }
+
+    let messages = vec![
+        crate::llm::Message::system(crate::writer::read_prompt("template_gen.md")),
+        crate::llm::Message::user(user),
+    ];
+    let config = state.config.read().await.clone();
+    let client = LlmClient::new(config);
+    let resp = match client.chat_stream(&messages, |_| {}).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(format!("prompts/templates/{id}"));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("模板生成失败: {e}")));
+        }
+    };
+
+    // 有些模型会先把思考过程写出来：从"模板名 + 主色"色板行处裁掉前面的闲话
+    let content = if let Some(ci) = resp.content.find("主色") {
+        let name_start = resp.content[..ci]
+            .rfind('\n')
+            .and_then(|p| resp.content[..p].rfind('\n').map(|p2| p2 + 1))
+            .unwrap_or(0);
+        resp.content[name_start..].trim().to_string()
+    } else {
+        resp.content.trim().to_string()
+    };
+    if content.len() < 100 || !content.contains('<') {
+        let _ = std::fs::remove_dir_all(format!("prompts/templates/{id}"));
+        let preview: String = content.chars().take(200).collect();
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("AI 生成的模板内容无效：{preview}")));
+    }
+
+    let mut content = content;
+    if !asset_assets.is_empty() {
+        content.push_str(&format!("\n\n==== 可用贴纸素材，逐个编写具体使用方法 ====\n（大尺寸照片不在列，排版时会走 {{photo:...}}；以下为本地贴纸：）\n{}", asset_placeholder_lines(&id, &asset_assets)));
+    }
+    std::fs::create_dir_all(format!("prompts/templates/{id}/assets"))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let path = format!("prompts/templates/{id}/template.md");
+    std::fs::write(&path, &content).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let name = content.lines().next().map(str::trim).unwrap_or(&id).to_string();
+    Ok(Json(serde_json::json!({ "id": id, "name": name, "assets": asset_assets.iter().map(|(f, _, _)| f.clone()).collect::<Vec<_>>() })))
+}
+
+// One line per sticker for the LLM prompt / template appendix, e.g.
+// "{{asset:id/asset1.gif}}（GIF 动画贴纸，约 230×172px）"
+fn asset_placeholder_lines(id: &str, assets: &[(String, u32, f64)]) -> String {
+    assets.iter().map(|(f, w, ratio)| {
+        let fmt = f.rsplit('.').next().unwrap_or("png");
+        let size = if *w > 0 {
+            let h = if *ratio > 0.0 { (*w as f64 / *ratio).round() as u32 } else { 0 };
+            if h > 0 { format!("约 {}×{}px", w, h) } else { format!("宽约 {}px", w) }
+        } else {
+            "小尺寸".into()
+        };
+        let kind = if fmt == "gif" { "GIF 动画贴纸" } else { "静态贴纸" };
+        format!("{{{{asset:{id}/{f}}}}}（{kind}，{size}）\n")
+    }).collect()
+}
+
+async fn delete_template(Path(id): Path<String>) -> Result<StatusCode, (StatusCode, String)> {
+    if !id.starts_with("custom_") {
+        return Err((StatusCode::BAD_REQUEST, "内置模板不可删除".into()));
+    }
+    // Folder layout AND legacy flat-md layouts both exit cleanly
+    let _ = std::fs::remove_dir_all(format!("prompts/templates/{id}"));
+    let _ = std::fs::remove_file(format!("prompts/templates/{id}.md"));
+    if !crate::formatter::all_template_id_dirs().iter().any(|(tid, _)| *tid == id) {
+        Ok(StatusCode::OK)
+    } else {
+        Err((StatusCode::INTERNAL_SERVER_ERROR, "删除失败".into()))
+    }
+}
+
+// === Template local assets (stickers/backgrounds) ===
+
+fn valid_template_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn valid_asset_file(file: &str) -> bool {
+    !file.is_empty()
+        && file != "." && file != ".."
+        && !file.contains('/') && !file.contains('\\')
+        && file.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !file.starts_with('.')
+}
+
+fn asset_dir(id: &str) -> String {
+    format!("prompts/templates/{id}/assets")
+}
+
+fn asset_content_type(file: &str) -> &'static str {
+    match file.rsplit('.').next().unwrap_or("") {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "image/jpeg",
+    }
+}
+
+async fn save_asset(id: &str, file: &str, bytes: &[u8]) -> Result<(), String> {
+    let dir = asset_dir(id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(format!("{dir}/{file}"), bytes).map_err(|e| e.to_string())
+}
+
+async fn list_template_assets(Path(id): Path<String>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !valid_template_id(&id) {
+        return Err((StatusCode::BAD_REQUEST, "非法模板 id".into()));
+    }
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(asset_dir(&id)) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if valid_asset_file(&n) {
+                names.push(serde_json::json!({ "file": n, "placeholder": format!("{{{{asset:{id}/{n}}}}}") }));
+            }
+        }
+    }
+    Ok(Json(serde_json::json!(names)))
+}
+
+async fn upload_template_asset(
+    State(_state): State<AppState>,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !valid_template_id(&id) {
+        return Err((StatusCode::BAD_REQUEST, "非法模板 id".into()));
+    }
+    if !id.starts_with("custom_") {
+        return Err((StatusCode::BAD_REQUEST, "仅自定义模板可上传素材".into()));
+    }
+    let mut saved = 0usize;
+    while let Some(field) = multipart.next_field().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? {
+        if field.name() != Some("file") { continue; }
+        let name = field.file_name().unwrap_or("").to_string();
+        if !valid_asset_file(&name) { continue; }
+        let data = field.bytes().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if data.len() > 2 * 1024 * 1024 { return Err((StatusCode::BAD_REQUEST, "单张素材需小于 2 MB".into())); }
+        save_asset(&id, &name, &data).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        saved += 1;
+    }
+    if saved == 0 { return Err((StatusCode::BAD_REQUEST, "未收到有效素材".into())); }
+    Ok(StatusCode::OK)
+}
+
+async fn serve_asset(
+    Path((id, file)): Path<(String, String)>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !valid_template_id(&id) || !valid_asset_file(&file) {
+        return Err((StatusCode::BAD_REQUEST, "非法素材路径".into()));
+    }
+    let bytes = std::fs::read(format!("{}/{file}", asset_dir(&id)))
+        .map_err(|_| (StatusCode::NOT_FOUND, "素材不存在".into()))?;
+    Ok(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, asset_content_type(&file))
+        .header(header::CACHE_CONTROL, "max-age=600")
+        .body(axum::body::Body::from(bytes))
+        .unwrap())
+}
+
+// {{asset:id/file}} placeholders -> (full, id, file). The export pipelines turn
+// these into base64 data URLs / WeChat-uploaded URLs so nothing external is needed.
+fn collect_asset_refs(html: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(p) = rest.find("{{asset:") {
+        let start = p + "{{asset:".len();
+        let Some(end) = rest[start..].find("}}") else { break };
+        let spec = &rest[start..start + end];
+        if let Some(slash) = spec.find('/') {
+            let (id, file) = (spec[..slash].trim(), spec[slash + 1..].trim());
+            if valid_template_id(id) && valid_asset_file(file) {
+                out.push((rest[p..start + end + 2].to_string(), id.to_string(), file.to_string()));
+            }
+        }
+        rest = &rest[start + end + 2..];
+    }
+    out
 }
 
 async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
@@ -1006,6 +1404,24 @@ async fn publish_draft(
         _ => generate_title(&config, &req.draft.unwrap_or_default()).await,
     };
 
+    // Template local assets: {{asset:id/file}} -> pseudo {{photo:__tpl_asset_x.ext}}
+    // so they ride the same WeChat material upload pipeline as user photos
+    let mut html = req.html.clone();
+    let mut asset_entries: Vec<(String, Vec<u8>, String)> = Vec::new();
+    for (i, (full, id, file)) in collect_asset_refs(&html).into_iter().enumerate() {
+        let path = format!("{}/{file}", asset_dir(&id));
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let ext = file.rsplit('.').next().unwrap_or("png");
+                let pseudo = format!("__tpl_asset_{i}.{ext}");
+                let ct = asset_content_type(&file);
+                html = html.replace(&full, &format!("{{{{photo:{pseudo}}}}}"));
+                asset_entries.push((pseudo, bytes, ct.to_string()));
+            }
+            Err(_) => html = html.replace(&full, ""),
+        }
+    }
+
     let photos = state.photos.lock().await;
     let mut photo_data: Vec<(String, Vec<u8>, String)> = Vec::new();
     for p in photos.iter() {
@@ -1019,21 +1435,51 @@ async fn publish_draft(
         photo_data.push((p.name.clone(), bytes, content_type.to_string()));
     }
     drop(photos);
+    photo_data.extend(asset_entries);
 
     let client = crate::wechat::WeChatClient::new(&app_id, &app_secret);
-    let media_id = client.push_draft(&title, &req.html, &photo_data).await
+    let media_id = client.push_draft(&title, &html, &photo_data).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(PublishResponse { media_id, title }))
 }
 
 async fn generate_title(config: &ModelConfig, draft: &str) -> String {
+    // 注意：只喂原文（markdown 草稿），绝不送排版后的 HTML（那里样式占 90% 的 token）
     let messages = vec![
-        crate::llm::Message::system("根据文章内容生成公众号标题。要求：10字以内，直接输出标题文字本身，不要引号、不要书名号、不要解释、不要前缀、不要标点符号结尾。例如输入'今天去吃了热干面'，输出'热干面里的武汉味'。"),
+        crate::llm::Message::system(
+            "你是标题机器。任务：为文章生成一个 10 字内的公众号标题。\n\
+             铁律：你的回复将由程序直接当作标题使用，任何多余字符都会被发布出去。\n\
+             - 只写标题文字本身；输出前后一个字都不能多\n\
+             - 禁止：引号 书名号 句号省略号等结尾标点 「标题：」等前缀 markdown 符号 解释 语气词哆嗦\n\
+             - 示例\n  输入：讲一场校园歌手大赛的幕后趣事与获奖名单\n  输出：校园歌手大赛落幕\n\
+             （注意：例子里输出就是标题四个字，没有「好的」「标题：」这些字）",
+        ),
         crate::llm::Message::user(draft.chars().take(500).collect::<String>()),
     ];
     let client = LlmClient::new(config.clone());
-    client.chat_with_max_tokens(&messages, 50).await.map(|r| r.content.trim().chars().take(12).collect()).unwrap_or_else(|_| "未命名文章".into())
+    let raw = client.chat_with_max_tokens(&messages, 60).await.map(|r| r.content).unwrap_or_default();
+
+    // 无脑后处理：任何模型都压回"标题本体"
+    let sanitized: String = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with(['-', '*', '>']))
+        .unwrap_or_else(|| raw.trim())
+        .trim_start_matches(['【', '】'])
+        .to_string();
+    let mut t = sanitized
+        .replace("《", "").replace("》", "")
+        .replace("「", "").replace("」", "")
+        .replace("\"", "").replace("'", "")
+        .replace("标题：", "").replace("标题:", "")
+        .replace("题目：", "").replace("题目:", "")
+        .replace("标题为：", "")
+        .trim()
+        .to_string();
+    while t.ends_with('。') || t.ends_with('.') || t.ends_with('！') || t.ends_with('！') || t.ends_with('？') || t.ends_with('?') || t.ends_with('，') || t.ends_with(',') || t.ends_with(' ') { t.pop(); }
+    let t: String = t.chars().take(20).collect();
+    if t.chars().count() < 2 { "未命名文章".into() } else { t }
 }
 
 // === Download as ZIP ===
@@ -1072,6 +1518,27 @@ async fn download_zip(
         }
     }
     drop(photos);
+
+    // Template local assets: pack the files into the zip as images/assetN.ext
+    let mut asset_files: Vec<(String, String, String, Vec<u8>)> = Vec::new(); // (placeholder, zipname, ct, bytes)
+    for (i, (full, id, file)) in collect_asset_refs(&html).into_iter().enumerate() {
+        let path = format!("{}/{file}", asset_dir(&id));
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let ext = file.rsplit('.').next().unwrap_or("png");
+                let zipname = format!("images/asset{0}.{ext}", i + 1);
+                let ct = asset_content_type(&file);
+                html = html.replace(&full, &format!("<img src=\"{zipname}\" style=\"width:100%;display:block\" />"));
+                asset_files.push((full, zipname, ct.to_string(), bytes));
+            }
+            Err(_) => html = html.replace(&full, ""),
+        }
+    }
+    for (_, zipname, _, bytes) in &asset_files {
+        zip.start_file(zipname.clone(), opts)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        zip.write_all(bytes).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     zip.start_file("article.html", opts)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
