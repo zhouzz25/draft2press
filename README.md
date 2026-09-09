@@ -12,14 +12,6 @@
 
 ![排版预览界面](docs/screenshot-format.png)
 
-## 3 分钟介绍视频
-
-完整产品流程演示（含生成初稿、逐条批注 diff、排版与推送）见 `docs/demo.mp4`：
-
-```markdown
-docs/demo.mp4  # 3 分钟产品介绍视频（离线兜底，课堂展示可直接播放）
-```
-
 ## 快速入门
 
 ```bash
