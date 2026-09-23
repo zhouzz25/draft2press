@@ -7,5 +7,6 @@ session-*.json
 session_project*.json
 guide/
 test/
-docs/agent/
-docs/*.pdf
+AGENTS.md
+docs/
+prompts/templates/custom_*/
