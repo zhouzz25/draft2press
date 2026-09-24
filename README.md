@@ -36,6 +36,17 @@
 
 ![排版预览界面](assets/ui-format.png)
 
+## 📺 演示视频
+
+<div align="center">
+
+[![Draft2Press 演示视频封面](assets/demo-video.jpg)](https://www.bilibili.com/video/BV1S5hb65EKh)
+
+**▶ [点击封面，在 Bilibili 观看完整演示](https://www.bilibili.com/video/BV1S5hb65EKh)**
+*（点击后才加载播放器，不会自动播放）*
+
+</div>
+
 ## 🚀 快速开始
 
 ```bash
